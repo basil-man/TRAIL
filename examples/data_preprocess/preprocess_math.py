@@ -7,11 +7,7 @@ from typing import List, Dict
 from verl.utils.hdfs_io import copy as hdfs_copy, makedirs
 
 SYSTEM_PROMPT = (
-    "A conversation between User and Assistant. The user asks a question, "
-    "and the Assistant solves it. The assistant first thinks about the reasoning process in the mind "
-    "and then provides the user with the answer. The reasoning process and answer are enclosed within "
-    "<think></think> and <answer></answer> tags, respectively, i.e., "
-    "<think> reasoning process here</think><answer> answer here</answer>."
+"You are a helpful assistant."
 )
 
 def extract_solution(solution_str):
@@ -22,11 +18,8 @@ def extract_solution(solution_str):
     assert fallback, "No solution found in: " + solution_str
     return fallback[-1]
 
-def get_process_fn(split: str, model_family: str, max_length: int = None):
+def get_process_fn(split: str, model_family: str):
     system_prompt = SYSTEM_PROMPT
-    if max_length is not None:
-        system_prompt += f" The output of the assistant should be within {max_length} tokens."
-
     def process_fn(example, idx):
         question_raw = example.pop('problem')
         answer_raw = example.pop('solution')
@@ -39,7 +32,7 @@ def get_process_fn(split: str, model_family: str, max_length: int = None):
         else:
             raise NotImplementedError()
 
-        question = question_raw + ' ' + instruction
+        question =instruction + ' ' + question_raw
 
         return {
             "data_source": "EleutherAI/hendrycks_math",
@@ -68,7 +61,6 @@ if __name__ == '__main__':
     parser.add_argument('--local_dir', default='./data/math')
     parser.add_argument('--hdfs_dir', default=None)
     parser.add_argument('--model_family', default='qwen', choices=["qwen", "deepseek"])
-    parser.add_argument('--max_length', type=int, default=None)
     args = parser.parse_args()
 
     subset_names = [
@@ -97,7 +89,7 @@ if __name__ == '__main__':
             print(f"Processing {split} - {subset}")
             ds = dataset[split][subset]
             processed = ds.map(
-                function=get_process_fn(split, model_family=args.model_family, max_length=args.max_length),
+                function=get_process_fn(split, model_family=args.model_family),
                 with_indices=True
             )
             all_data.extend(processed)
