@@ -43,7 +43,7 @@ We use the [EleutherAI MATH dataset](https://huggingface.co/datasets/EleutherAI/
 ```bash
 python examples/data_preprocess/preprocess_math.py \
   --model_family=qwen \
-  --save_dir=data/math_qwen
+  --local_dir=data/math_qwen
 ```
 
 This script formats questions and adds system prompts in the style required by Verl-compatible training.
