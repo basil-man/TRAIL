@@ -66,12 +66,14 @@ WorkerType = Type[Worker]
 _global_http_session: Optional[aiohttp.ClientSession] = None
 _analyzer_lock = asyncio.Lock()
 
+
 # 创建或获取全局HTTP会话
 async def get_http_session():
     global _global_http_session
     if (_global_http_session is None) or _global_http_session.closed:
         _global_http_session = aiohttp.ClientSession()
     return _global_http_session
+
 
 # 确保会话在退出时关闭
 @asynccontextmanager
@@ -80,8 +82,9 @@ async def managed_http_session():
     try:
         yield session
     except Exception as e:
-        print(f"HTTP会话操作异常: {str(e)}")
+        print(f"HTTP session operation error: {str(e)}")
         # 异常情况下不关闭会话，让它继续存在供后续使用
+
 
 # 关闭全局会话
 async def close_global_session():
@@ -89,7 +92,7 @@ async def close_global_session():
     if _global_http_session and not _global_http_session.closed:
         await _global_http_session.close()
         _global_http_session = None
-        print("全局HTTP会话已关闭")
+        print("Global HTTP session closed")
 
 
 class Role(Enum):
@@ -133,12 +136,12 @@ class ResourcePoolManager:
     def get_resource_pool(self, role: Role) -> RayResourcePool:
         """Get the resource pool of the worker_cls"""
         return self.resource_pool_dict[self.mapping[role]]
-    
+
     def reset_pools(self):
         """尝试重置所有资源池的状态"""
         for name, pool in self.resource_pool_dict.items():
             try:
-                print(f"尝试重置资源池: {name}")
+                print(f"Trying to reset resource pool: {name}")
                 # 这里不是标准API，但尝试调用可能存在的方法
                 if hasattr(pool, "reset") and callable(pool.reset):
                     pool.reset()
@@ -146,7 +149,7 @@ class ResourcePoolManager:
                 if hasattr(pool, "release") and callable(pool.release):
                     pool.release()
             except Exception as e:
-                print(f"重置资源池 {name} 失败: {e}")
+                print(f"Failed to reset resource pool {name}: {e}")
 
 
 import torch
@@ -399,12 +402,12 @@ def _timer(name: str, timing_raw: Dict[str, float]):
 async def request_analyzerhost(endpoint, json_data=None, timeout=10, max_retries=3, hard_timeout=30):
     """发送请求到analyzerhost，支持重试和硬超时"""
     url = f"http://localhost:5000/{endpoint}"
-    
+
     # 创建总体超时的计时器
     start_time = time.time()
     retries = 0
     last_error = None
-    
+
     while retries < max_retries and (time.time() - start_time) < hard_timeout:
         try:
             async with managed_http_session() as session:
@@ -412,60 +415,64 @@ async def request_analyzerhost(endpoint, json_data=None, timeout=10, max_retries
                 request_timeout = min(timeout, hard_timeout - (time.time() - start_time))
                 if request_timeout <= 0:
                     break
-                    
-                print(f"发送请求到 {endpoint}，尝试 {retries+1}/{max_retries}...")
+
+                print(f"Sending request to {endpoint}, attempt {retries+1}/{max_retries}...")
                 # 发送请求
                 if json_data:
                     async with session.post(url, json=json_data, timeout=request_timeout) as response:
                         if response.status == 200:
                             return await response.json()
                         else:
-                            last_error = f"请求失败: HTTP {response.status}, {await response.text()}"
+                            last_error = f"Request failed: HTTP {response.status}, {await response.text()}"
                 else:
                     async with session.post(url, timeout=request_timeout) as response:
                         if response.status == 200:
                             return await response.json()
                         else:
-                            last_error = f"请求失败: HTTP {response.status}, {await response.text()}"
-                            
+                            last_error = f"Request failed: HTTP {response.status}, {await response.text()}"
+
         except asyncio.TimeoutError:
-            last_error = f"请求超时 (尝试 {retries+1}/{max_retries}, 已用时 {time.time() - start_time:.1f}s)"
+            last_error = (
+                f"Request timeout (attempt {retries+1}/{max_retries}, time elapsed {time.time() - start_time:.1f}s)"
+            )
         except aiohttp.ClientConnectorError as e:
-            last_error = f"连接错误: {str(e)} (尝试 {retries+1}/{max_retries})"
+            last_error = f"Connection error: {str(e)} (attempt {retries+1}/{max_retries})"
         except Exception as e:
-            last_error = f"请求错误: {str(e)} (尝试 {retries+1}/{max_retries})"
-            
+            last_error = f"Request error: {str(e)} (attempt {retries+1}/{max_retries})"
+
         retries += 1
         # 指数退避重试
         if retries < max_retries:
             await asyncio.sleep(min(1 * (2 ** (retries - 1)), 5))
-    
-    print(f"请求analyzerhost失败: {last_error}")
+
+    print(f"Failed to request analyzerhost: {last_error}")
     return {"status": "error", "message": last_error}
+
 
 async def unload_analyzer_model(skip_lock=False):
     """请求卸载analyzerhost的模型，带锁保护"""
     if skip_lock:
-        print("正在请求卸载analyzerhost模型...")
+        print("Requesting to unload analyzerhost model...")
         result = await request_analyzerhost("unload_model", timeout=20, hard_timeout=60)
         if result and result.get("status") == "success":
-            print("analyzerhost模型已卸载")
+            print("Analyzerhost model unloaded")
             return True
-        print(f"卸载analyzerhost模型失败: {result}")
+        print(f"Failed to unload analyzerhost model: {result}")
         return False
     else:
         async with _analyzer_lock:
             return await unload_analyzer_model(skip_lock=True)
 
+
 async def load_analyzer_model(skip_lock=False):
     """请求重新加载analyzerhost的模型，带锁保护"""
     if skip_lock:
-        print("正在请求重新加载analyzerhost模型...")
+        print("Requesting to reload analyzerhost model...")
         result = await request_analyzerhost("load_model", timeout=20, hard_timeout=60)
         if result and result.get("status") == "success":
-            print("analyzerhost模型已重新加载")
+            print("Analyzerhost model reloaded")
             return True
-        print(f"重新加载analyzerhost模型失败: {result}")
+        print(f"Failed to reload analyzerhost model: {result}")
         return False
     else:
         async with _analyzer_lock:
@@ -1004,10 +1011,14 @@ class RayPPOTrainer(object):
                             ]
                             if self.use_reference_policy:
                                 tasks.append(
-                                    asyncio.create_task(asyncio.to_thread(self.ref_policy_wg.compute_ref_log_prob, batch))
+                                    asyncio.create_task(
+                                        asyncio.to_thread(self.ref_policy_wg.compute_ref_log_prob, batch)
+                                    )
                                 )
                             if self.use_critic:
-                                tasks.append(asyncio.create_task(asyncio.to_thread(self.critic_wg.compute_values, batch)))
+                                tasks.append(
+                                    asyncio.create_task(asyncio.to_thread(self.critic_wg.compute_values, batch))
+                                )
 
                             results = await asyncio.gather(*tasks)
 
@@ -1077,66 +1088,83 @@ class RayPPOTrainer(object):
                                 # 2) 判断是否触发蒸馏
                                 current_reward_mean = metrics.get("critic/score/mean", 0)
                                 if self.replay_buffer.should_distill(self.global_steps, current_reward_mean):
-                                    print(f"第{self.global_steps}步触发蒸馏，当前奖励均值: {current_reward_mean:.4f}")
-                                    
+                                    print(
+                                        f"Distillation triggered at step {self.global_steps}, current reward mean: {current_reward_mean:.4f}"
+                                    )
+
                                     # 使用锁保护整个蒸馏流程
                                     async with _analyzer_lock:
                                         try:
-                                            print("开始蒸馏过程...")
+                                            print("Starting distillation process...")
                                             # 一次性拉取 N 个样本作为多个microbatch
                                             replay_batches = self.replay_buffer.sample(
                                                 min(self.off_policy_batch_size, len(self.replay_buffer))
                                             )
-                                            
-                                            print(f"采样完成: 获取了 {len(replay_batches)} 个microbatch，总计 {sum(len(batch) for batch in replay_batches)} 个样本")
-                                            
+
+                                            print(
+                                                f"Sampling completed: got {len(replay_batches)} microbatches, total {sum(len(batch) for batch in replay_batches)} samples"
+                                            )
+
                                             if replay_batches:
                                                 all_metrics = {}
                                                 total_samples = 0
-                                                
+
                                                 # 添加任务列表以便于等待所有任务完成
                                                 pending_tasks = []
-                                                
+
                                                 # 对每个microbatch分别进行处理
                                                 for batch_idx, micro_batch in enumerate(replay_batches):
                                                     if not micro_batch:
                                                         continue
-                                                        
+
                                                     micro_size = len(micro_batch)
                                                     total_samples += micro_size
-                                                    print(f"处理microbatch {batch_idx+1}/{len(replay_batches)}，包含 {micro_size} 个样本")
-                                                    
+                                                    print(
+                                                        f"Processing microbatch {batch_idx+1}/{len(replay_batches)}, containing {micro_size} samples"
+                                                    )
+
                                                     # 处理边缘情况
                                                     if micro_size < 2:
                                                         micro_batch = micro_batch * 2
-                                                        print(f"警告: microbatch仅有1个样本，复制至2个")
-                                                    
+                                                        print(
+                                                            f"Warning: microbatch has only 1 sample, duplicating to 2"
+                                                        )
+
                                                     # 确保样本数为偶数
                                                     if len(micro_batch) % 2 == 1:
                                                         micro_batch.append(micro_batch[0])
-                                                        print(f"警告: microbatch样本数为奇数，添加一个复制样本使其变为偶数({len(micro_batch)})")
-                                                    
+                                                        print(
+                                                            f"Warning: microbatch has odd number of samples, adding duplicate to make it even ({len(micro_batch)})"
+                                                        )
+
                                                     # 创建当前microbatch的DataProto
                                                     replay_batch = DataProto.from_list(micro_batch)
-                                                    
+
                                                     # 添加5秒超时控制，防止卡死
-                                                    print(f"计算microbatch {batch_idx+1} 的log_prob...")
+                                                    print(f"Computing log_prob for microbatch {batch_idx+1}...")
                                                     try:
                                                         # 使用带超时的异步调用
                                                         log_probs_task = asyncio.create_task(
                                                             asyncio.wait_for(
-                                                                asyncio.to_thread(self.actor_rollout_wg.compute_log_prob, replay_batch),
-                                                                timeout=60.0  # 设置更长的超时时间
+                                                                asyncio.to_thread(
+                                                                    self.actor_rollout_wg.compute_log_prob, replay_batch
+                                                                ),
+                                                                timeout=60.0,  # 设置更长的超时时间
                                                             )
                                                         )
                                                         # 等待当前任务完成后再处理下一个批次
                                                         log_probs_data = await log_probs_task
-                                                        
+
                                                         # 计算IS权重并处理数据
-                                                        from verl.trainer.ppo.core_algos import compute_importance_sampling_weights
+                                                        from verl.trainer.ppo.core_algos import (
+                                                            compute_importance_sampling_weights,
+                                                        )
+
                                                         log_prob = log_probs_data.batch["old_log_probs"]
                                                         log_prob_old = replay_batch.batch["log_prob_old"]
-                                                        eos_mask = replay_batch.batch["attention_mask"][:, -log_prob.shape[1]:]
+                                                        eos_mask = replay_batch.batch["attention_mask"][
+                                                            :, -log_prob.shape[1] :
+                                                        ]
                                                         advantages = replay_batch.batch["advantages"]
 
                                                         # 计算IS权重
@@ -1146,94 +1174,119 @@ class RayPPOTrainer(object):
                                                             eos_mask=eos_mask,
                                                             max_weight=self.max_is_weight,
                                                         )
-                                                        
+
                                                         is_weights_cpu = is_weights.detach().cpu()
-                                                        
+
                                                         # 设置元数据
                                                         replay_batch.meta_info["is_weights"] = is_weights_cpu
-                                                        replay_batch.meta_info["off_policy_weight"] = self.off_policy_weight
+                                                        replay_batch.meta_info["off_policy_weight"] = (
+                                                            self.off_policy_weight
+                                                        )
                                                         replay_batch.meta_info["global_token_num"] = torch.sum(
                                                             replay_batch.batch["attention_mask"], dim=-1
                                                         ).tolist()
 
                                                         # 执行单个microbatch的离线更新
-                                                        print(f"执行microbatch {batch_idx+1} 的离线更新...")
+                                                        print(
+                                                            f"Executing off-policy update for microbatch {batch_idx+1}..."
+                                                        )
                                                         # 等待当前更新完成
                                                         off_policy_output = await asyncio.wait_for(
-                                                            asyncio.to_thread(self.actor_rollout_wg.update_actor_off_policy, replay_batch),
-                                                            timeout=60.0
+                                                            asyncio.to_thread(
+                                                                self.actor_rollout_wg.update_actor_off_policy,
+                                                                replay_batch,
+                                                            ),
+                                                            timeout=60.0,
                                                         )
-                                                        
+
                                                         # 处理指标
                                                         if isinstance(off_policy_output, dict):
                                                             batch_metrics = off_policy_output
-                                                        elif hasattr(off_policy_output, 'meta_info') and "metrics" in off_policy_output.meta_info:
+                                                        elif (
+                                                            hasattr(off_policy_output, "meta_info")
+                                                            and "metrics" in off_policy_output.meta_info
+                                                        ):
                                                             batch_metrics = off_policy_output.meta_info["metrics"]
                                                         else:
                                                             batch_metrics = {}
-                                                        
+
                                                         if "off_policy_empty" not in batch_metrics:
                                                             for k, v in batch_metrics.items():
                                                                 if k not in all_metrics:
                                                                     all_metrics[k] = []
                                                                 all_metrics[k].extend(v if isinstance(v, list) else [v])
                                                         else:
-                                                            print(f"警告: microbatch {batch_idx+1} 更新为空")
-                                                            
+                                                            print(f"Warning: microbatch {batch_idx+1} update is empty")
+
                                                         # 强制执行一次垃圾回收
                                                         import gc
+
                                                         gc.collect()
                                                         torch.cuda.empty_cache()
-                                                        
+
                                                     except asyncio.TimeoutError:
-                                                        print(f"警告: microbatch {batch_idx+1} 处理超时，跳过")
+                                                        print(
+                                                            f"Warning: microbatch {batch_idx+1} processing timeout, skipping"
+                                                        )
                                                         # 尝试恢复Ray workers状态
                                                         try:
                                                             ray.experimental.force_reset()
-                                                            print("已尝试重置Ray资源")
+                                                            print("Attempted to reset Ray resources")
                                                         except Exception as reset_err:
-                                                            print(f"重置Ray资源失败: {reset_err}")
+                                                            print(f"Failed to reset Ray resources: {reset_err}")
                                                         continue
                                                     except Exception as e:
-                                                        print(f"处理microbatch {batch_idx+1} 时出错: {str(e)}")
+                                                        print(f"Error processing microbatch {batch_idx+1}: {str(e)}")
                                                         import traceback
+
                                                         print(traceback.format_exc())
                                                         continue
-                                                    
+
                                                     # 每个microbatch处理后暂停一小段时间，给Ray资源释放的机会
                                                     await asyncio.sleep(0.5)
-                                                    
+
                                                 # 汇总所有microbatch的指标
                                                 if all_metrics:
-                                                    print(f"离线更新完成: 处理了 {total_samples} 个样本，汇总指标...")
+                                                    print(
+                                                        f"Off-policy update completed: processed {total_samples} samples, aggregating metrics..."
+                                                    )
                                                     off_policy_metrics = reduce_metrics(all_metrics)
                                                     for k, v in off_policy_metrics.items():
                                                         metrics[f"off_policy_{k}"] = v
-                                                        
+
                                                     # 更新 buffer 蒸馏指标
-                                                    reward_improvement = metrics.get("critic/rewards/mean", 0) - current_reward_mean
-                                                    self.replay_buffer.update_distill_metrics(self.global_steps, reward_improvement)
+                                                    reward_improvement = (
+                                                        metrics.get("critic/rewards/mean", 0) - current_reward_mean
+                                                    )
+                                                    self.replay_buffer.update_distill_metrics(
+                                                        self.global_steps, reward_improvement
+                                                    )
                                                     distill_stats = self.replay_buffer.get_distill_stats()
-                                                    metrics.update({f"distill_{k}": v for k, v in distill_stats.items()})
-                                                    metrics.update({
-                                                        "replay_buffer/samples_used": total_samples,
-                                                        "replay_buffer/buffer_size": len(self.replay_buffer),
-                                                        "replay_buffer/reward_improvement": reward_improvement,
-                                                    })
+                                                    metrics.update(
+                                                        {f"distill_{k}": v for k, v in distill_stats.items()}
+                                                    )
+                                                    metrics.update(
+                                                        {
+                                                            "replay_buffer/samples_used": total_samples,
+                                                            "replay_buffer/buffer_size": len(self.replay_buffer),
+                                                            "replay_buffer/reward_improvement": reward_improvement,
+                                                        }
+                                                    )
                                                 else:
-                                                    print("警告: 所有microbatch更新均为空，无有效指标")
+                                                    print("Warning: all microbatch updates are empty, no valid metrics")
                                         except Exception as e:
-                                            print(f"蒸馏过程发生异常: {str(e)}")
+                                            print(f"Exception during distillation process: {str(e)}")
                                             import traceback
+
                                             print(traceback.format_exc())
                                         finally:
                                             # 蒸馏结束，确保资源释放
-                                            print("蒸馏过程结束，确保资源释放")
+                                            print("Distillation process ended, ensuring resource cleanup")
                                             torch.cuda.empty_cache()
                                             await asyncio.sleep(1.0)  # 给系统一点时间来释放资源
-                                    
+
                                     # 蒸馏结束后等待一段时间再继续训练，确保资源释放
-                                    print("蒸馏流程结束，短暂等待再继续训练")
+                                    print("Distillation flow ended, brief wait before continuing training")
                                     await asyncio.sleep(2.0)
 
                         # 无论是否执行蒸馏，都记录当前的缓冲区状态
@@ -1273,13 +1326,13 @@ class RayPPOTrainer(object):
                             val_metrics = await self.async_validate()
                             pprint(f"Final validation metrics: {val_metrics}")
                             logger.log(data=val_metrics, step=self.global_steps)
-                        
+
                         # 训练结束时关闭会话
                         await close_global_session()
                         return
         except Exception as e:
             # 确保异常退出时也能关闭会话
-            print(f"训练过程中发生异常: {str(e)}")
+            print(f"Exception during training: {str(e)}")
             await close_global_session()
             raise
 

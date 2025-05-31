@@ -31,7 +31,7 @@ from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     StateDictType,
     ShardedStateDictConfig,
-    ShardedOptimStateDictConfig
+    ShardedOptimStateDictConfig,
 )
 from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
@@ -83,10 +83,8 @@ logger.setLevel(os.getenv("VERL_PPO_LOGGING_LEVEL", "WARN"))
 
 
 def create_device_mesh(world_size, fsdp_size):
-    if (fsdp_size < 0 or fsdp_size >= world_size):
-        device_mesh = init_device_mesh(
-            "cuda", mesh_shape=(world_size,), mesh_dim_names=["fsdp"]
-        )
+    if fsdp_size < 0 or fsdp_size >= world_size:
+        device_mesh = init_device_mesh("cuda", mesh_shape=(world_size,), mesh_dim_names=["fsdp"])
     else:
         raise ValueError(
             "HSDP is not supported yet because it produces incorrect results for now. Please set fsdp_size=-1"
@@ -108,9 +106,7 @@ def get_sharding_strategy(device_mesh):
     elif device_mesh.ndim == 2:
         sharding_strategy = ShardingStrategy.HYBRID_SHARD
     else:
-        raise NotImplementedError(
-            f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2"
-        )
+        raise NotImplementedError(f"Get device mesh ndim={device_mesh.ndim}, but only support 1 or 2")
     return sharding_strategy
 
 
@@ -131,15 +127,11 @@ class ActorRolloutRefWorker(Worker):
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
         # TODO(sgm): support FSDP hybrid shard for larger model
-        self.device_mesh = create_device_mesh(
-            world_size=world_size, fsdp_size=self.config.actor.fsdp_config.fsdp_size
-        )
+        self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=self.config.actor.fsdp_config.fsdp_size)
 
         # build device mesh for Ulysses Sequence Parallel
         self.ulysses_device_mesh = None
-        self.ulysses_sequence_parallel_size = self.config.actor.get(
-            "ulysses_sequence_parallel_size", 1
-        )
+        self.ulysses_sequence_parallel_size = self.config.actor.get("ulysses_sequence_parallel_size", 1)
         dp = world_size // self.ulysses_sequence_parallel_size
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(
@@ -148,9 +140,7 @@ class ActorRolloutRefWorker(Worker):
                 mesh_dim_names=["dp", "sp"],
             )
 
-        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(
-            self.ulysses_device_mesh
-        )
+        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.role = role
         assert self.role in [
@@ -173,29 +163,17 @@ class ActorRolloutRefWorker(Worker):
         self._is_offload_grad = False
         self._is_offload_optimizer = False
         if self._is_actor:
-            self._is_offload_param = self.config.actor.fsdp_config.get(
-                "param_offload", False
-            )
-            self._is_offload_grad = self.config.actor.fsdp_config.get(
-                "grad_offload", False
-            )
-            self._is_offload_optimizer = self.config.actor.fsdp_config.get(
-                "optimizer_offload", False
-            )
+            self._is_offload_param = self.config.actor.fsdp_config.get("param_offload", False)
+            self._is_offload_grad = self.config.actor.fsdp_config.get("grad_offload", False)
+            self._is_offload_optimizer = self.config.actor.fsdp_config.get("optimizer_offload", False)
         elif self._is_ref:
             # TODO: it seems that manual offload is slowly than FSDP offload
-            self._is_offload_param = self.config.ref.fsdp_config.get(
-                "param_offload", False
-            )
+            self._is_offload_param = self.config.ref.fsdp_config.get("param_offload", False)
 
         # normalize config
         if self._is_actor:
-            self.config.actor.ppo_mini_batch_size //= (
-                self.device_mesh.shape[0] // self.ulysses_sequence_parallel_size
-            )
-            self.config.actor.ppo_micro_batch_size //= (
-                self.device_mesh.shape[0] // self.ulysses_sequence_parallel_size
-            )
+            self.config.actor.ppo_mini_batch_size //= self.device_mesh.shape[0] // self.ulysses_sequence_parallel_size
+            self.config.actor.ppo_micro_batch_size //= self.device_mesh.shape[0] // self.ulysses_sequence_parallel_size
             self.config.actor.ppo_mini_batch_size *= self.config.rollout.n
             # Bairu: delete this following the latest change in verl
             # self.config.actor.ppo_micro_batch_size *= self.config.rollout.n
@@ -250,9 +228,7 @@ class ActorRolloutRefWorker(Worker):
             torch_dtype = PrecisionType.to_dtype(torch_dtype)
 
         # override model kwargs
-        actor_model_config = AutoConfig.from_pretrained(
-            local_path, trust_remote_code=trust_remote_code
-        )
+        actor_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
 
         if use_remove_padding:
             from verl.models.registry import check_model_support_rmpad
@@ -270,16 +246,12 @@ class ActorRolloutRefWorker(Worker):
             "pad_token_id": self.tokenizer.pad_token_id,
         }
         override_config_kwargs.update(override_model_config)
-        update_model_config(
-            actor_model_config, override_config_kwargs=override_config_kwargs
-        )
+        update_model_config(actor_model_config, override_config_kwargs=override_config_kwargs)
         if self.rank == 0:
             print(f"Model config after override: {actor_model_config}")
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not actor_model_config.tie_word_embeddings
-        )
+        init_context = get_init_weight_context_manager(use_meta_tensor=not actor_model_config.tie_word_embeddings)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -295,9 +267,7 @@ class ActorRolloutRefWorker(Worker):
             actor_module.to(torch_dtype)
 
             if enable_gradient_checkpointing:
-                actor_module.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False}
-                )
+                actor_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         torch.distributed.barrier()
 
         if self.rank == 0:
@@ -308,15 +278,9 @@ class ActorRolloutRefWorker(Worker):
         # We wrap FSDP for rollout as well
         mixed_precision_config = fsdp_config.get("mixed_precision", None)
         if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(
-                mixed_precision_config.get("param_dtype", "bf16")
-            )
-            reduce_dtype = PrecisionType.to_dtype(
-                mixed_precision_config.get("reduce_dtype", "fp32")
-            )
-            buffer_dtype = PrecisionType.to_dtype(
-                mixed_precision_config.get("buffer_dtype", "fp32")
-            )
+            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
+            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
         else:
             param_dtype = torch.bfloat16
             reduce_dtype = torch.float32
@@ -328,9 +292,7 @@ class ActorRolloutRefWorker(Worker):
             buffer_dtype=buffer_dtype,
         )
 
-        auto_wrap_policy = get_fsdp_wrap_policy(
-            module=actor_module, config=fsdp_config.get("wrap_policy", None)
-        )
+        auto_wrap_policy = get_fsdp_wrap_policy(module=actor_module, config=fsdp_config.get("wrap_policy", None))
 
         if self._is_rollout and self.config.rollout.name == "hf":
             # TODO(zhangchi.usc1992, shengguangming) fix me. Current, auto_wrap_policy causes HFRollout to hang in Gemma
@@ -404,17 +366,13 @@ class ActorRolloutRefWorker(Worker):
         assert (
             self.world_size % infer_tp == 0
         ), f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
-        rollout_device_mesh = init_device_mesh(
-            "cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"]
-        )
+        rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
 
         if self.config.rollout.name == "hf":
             from verl.workers.rollout import HFRollout
             from verl.workers.sharding_manager import BaseShardingManager
 
-            rollout = HFRollout(
-                module=self.actor_module_fsdp, config=self.config.rollout
-            )
+            rollout = HFRollout(module=self.actor_module_fsdp, config=self.config.rollout)
             rollout_sharding_manager = BaseShardingManager()
             # TODO: a sharding manager that do nothing?
         elif self.config.rollout.name == "vllm":
@@ -451,9 +409,7 @@ class ActorRolloutRefWorker(Worker):
 
         from omegaconf import OmegaConf
 
-        override_model_config = OmegaConf.to_container(
-            self.config.model.get("override_config", OmegaConf.create())
-        )
+        override_model_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
 
         use_remove_padding = self.config.model.get("use_remove_padding", False)
 
@@ -472,9 +428,7 @@ class ActorRolloutRefWorker(Worker):
                 to_load_path = self.config.model.path
             else:
                 # find latest checkpoint
-                latest_checkpint = find_latest_checkpoint(
-                    self.config.model.checkpoint_path
-                )
+                latest_checkpint = find_latest_checkpoint(self.config.model.checkpoint_path)
                 if latest_checkpint is None:
                     to_load_path = self.config.model.path
                 else:
@@ -492,9 +446,7 @@ class ActorRolloutRefWorker(Worker):
                 optim_config=optim_config,
                 override_model_config=override_model_config,
                 use_remove_padding=use_remove_padding,
-                enable_gradient_checkpointing=self.config.model.get(
-                    "enable_gradient_checkpointing", False
-                ),
+                enable_gradient_checkpointing=self.config.model.get("enable_gradient_checkpointing", False),
                 trust_remote_code=self.config.model.get("trust_remote_code", False),
                 role="actor",
             )
@@ -503,13 +455,16 @@ class ActorRolloutRefWorker(Worker):
                 # overwrite optimzier states
                 if to_load_path != self.config.model.path:
                     local_model_path = os.path.join(
-                        to_load_path, f'model_world_size_{self.world_size}_rank_{self.rank}.pt',
+                        to_load_path,
+                        f"model_world_size_{self.world_size}_rank_{self.rank}.pt",
                     )
                     local_optim_path = os.path.join(
-                        to_load_path, f'optim_world_size_{self.world_size}_rank_{self.rank}.pt',
+                        to_load_path,
+                        f"optim_world_size_{self.world_size}_rank_{self.rank}.pt",
                     )
                     local_extra_state_path = os.path.join(
-                        to_load_path, f'extra_state_world_size_{self.world_size}_rank_{self.rank}.pt',
+                        to_load_path,
+                        f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt",
                     )
                     print(
                         f"[rank-{self.rank}]: Loading from {local_model_path} "
@@ -519,11 +474,13 @@ class ActorRolloutRefWorker(Worker):
                     optimizer_state_dict = torch.load(local_optim_path)
                     extra_state_dict = torch.load(local_extra_state_path)
 
-                    lr_scheduler_state_dict = extra_state_dict['lr_scheduler']
+                    lr_scheduler_state_dict = extra_state_dict["lr_scheduler"]
 
                     state_dict_cfg = ShardedStateDictConfig(offload_to_cpu=True)
                     optim_cfg = ShardedOptimStateDictConfig(offload_to_cpu=True)
-                    with FSDP.state_dict_type(self.actor_module_fsdp, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
+                    with FSDP.state_dict_type(
+                        self.actor_module_fsdp, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg
+                    ):
                         self.actor_module_fsdp.load_state_dict(model_state_dict)
                         self.actor_optimizer.load_state_dict(optimizer_state_dict)
 
@@ -535,14 +492,10 @@ class ActorRolloutRefWorker(Worker):
             if self._is_offload_param:
                 # param is require during state_dict in sharding manager
                 offload_fsdp_grad(module=self.actor_module_fsdp)
-                log_gpu_memory_usage(
-                    "After offload actor grad during init", logger=logger
-                )
+                log_gpu_memory_usage("After offload actor grad during init", logger=logger)
             if self._is_offload_optimizer:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-                log_gpu_memory_usage(
-                    "After offload actor optimizer during init", logger=logger
-                )
+                log_gpu_memory_usage("After offload actor optimizer during init", logger=logger)
 
         # load from checkpoint
         if self._is_actor:
@@ -571,9 +524,7 @@ class ActorRolloutRefWorker(Worker):
             OmegaConf.set_struct(self.config.ref, True)
             with open_dict(self.config.ref):
                 self.config.ref.use_remove_padding = use_remove_padding
-            self.ref_policy = DataParallelPPOActor(
-                config=self.config.ref, actor_module=self.ref_module_fsdp
-            )
+            self.ref_policy = DataParallelPPOActor(config=self.config.ref, actor_module=self.ref_module_fsdp)
 
         if self._is_actor:
             self.flops_counter = FlopsCounter(self.actor_model_config)
@@ -592,9 +543,7 @@ class ActorRolloutRefWorker(Worker):
                 load_grad=self._is_offload_grad,
             )
         if self._is_offload_optimizer:
-            load_fsdp_optimizer(
-                optimizer=self.actor_optimizer, device_id=torch.cuda.current_device()
-            )
+            load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
 
         data.batch = data.batch.cuda()
 
@@ -607,15 +556,8 @@ class ActorRolloutRefWorker(Worker):
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
             global_num_tokens = data.meta_info["global_token_num"]
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(
-                global_num_tokens, delta_time
-            )
-            metrics["mfu/actor"] = (
-                estimated_flops
-                * self.config.actor.ppo_epochs
-                / promised_flops
-                / self.world_size
-            )
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            metrics["mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
 
             self.actor_lr_scheduler.step()
             lr = self.actor_lr_scheduler.get_last_lr()[0]
@@ -630,9 +572,7 @@ class ActorRolloutRefWorker(Worker):
             output = output.to("cpu")
 
         if self._is_offload_param:
-            offload_fsdp_param_and_grad(
-                module=self.actor_module_fsdp, offload_grad=self._is_offload_grad
-            )
+            offload_fsdp_param_and_grad(module=self.actor_module_fsdp, offload_grad=self._is_offload_grad)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.actor_optimizer)
         torch.cuda.empty_cache()
@@ -653,9 +593,7 @@ class ActorRolloutRefWorker(Worker):
                     load_grad=self._is_offload_grad,
                 )
             if self._is_offload_optimizer:
-                load_fsdp_optimizer(
-                    optimizer=self.actor_optimizer, device_id=torch.cuda.current_device()
-                )
+                load_fsdp_optimizer(optimizer=self.actor_optimizer, device_id=torch.cuda.current_device())
 
             data.batch = data.batch.cuda()
             if is_weights is not None:
@@ -671,19 +609,14 @@ class ActorRolloutRefWorker(Worker):
                     # 添加任务超时检测
                     if time.time() - start_time > 30:  # 如果前期处理已经超过30秒
                         print("警告：update_actor_off_policy处理时间过长，可能导致卡死")
-                        
+
                     # 调用actor的update_actor_off_policy方法，但传入额外的is_weights参数
                     metrics = self.actor.update_actor_off_policy(data)
                 delta_time = timer.last
                 global_num_tokens = data.meta_info.get("global_token_num", 0)
-                estimated_flops, promised_flops = self.flops_counter.estimate_flops(
-                    global_num_tokens, delta_time
-                )
+                estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
                 metrics["mfu/actor_off_policy"] = (
-                    estimated_flops
-                    * self.config.actor.ppo_epochs
-                    / promised_flops
-                    / self.world_size
+                    estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
                 )
 
                 log_gpu_memory_usage("After update off-policy", logger=logger)
@@ -698,61 +631,59 @@ class ActorRolloutRefWorker(Worker):
 
             # 强制释放所有可能的资源
             if self._is_offload_param:
-                offload_fsdp_param_and_grad(
-                    module=self.actor_module_fsdp, offload_grad=self._is_offload_grad
-                )
+                offload_fsdp_param_and_grad(module=self.actor_module_fsdp, offload_grad=self._is_offload_grad)
             if self._is_offload_optimizer:
                 offload_fsdp_optimizer(optimizer=self.actor_optimizer)
-                
+
             # 清空数据引用
             data = None
 
             # 强制运行垃圾回收
             import gc
+
             gc.collect()
             torch.cuda.empty_cache()
-            
+
             # 检查处理时间
             if time.time() - start_time > 45:  # 如果总处理时间超过45秒
                 print(f"警告：update_actor_off_policy总处理时间过长: {time.time() - start_time:.2f}秒")
-                
+
             return output
-        
+
         except Exception as e:
             # 确保即使出错也能释放资源
             print(f"离线更新时出错: {str(e)}")
             import traceback
+
             print(traceback.format_exc())
-            
+
             try:
                 # 尝试恢复分布式状态
                 torch.distributed.barrier(timeout=5)
             except:
                 pass
-                
+
             if self._is_offload_param:
                 try:
-                    offload_fsdp_param_and_grad(
-                        module=self.actor_module_fsdp, offload_grad=self._is_offload_grad
-                    )
+                    offload_fsdp_param_and_grad(module=self.actor_module_fsdp, offload_grad=self._is_offload_grad)
                 except Exception as e:
                     print(f"错误处理中offload参数失败: {e}")
-            
+
             if self._is_offload_optimizer:
                 try:
                     offload_fsdp_optimizer(optimizer=self.actor_optimizer)
                 except Exception as e:
                     print(f"错误处理中offload优化器失败: {e}")
-            
+
             # 强制清理
             import gc
+
             gc.collect()
             torch.cuda.empty_cache()
-            
+
             # 返回错误指标而不是抛出异常
             return {"metrics": {"error": str(e), "off_policy_empty": True}}
-    
-    
+
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         prompts = prompts.to("cuda")
@@ -774,9 +705,7 @@ class ActorRolloutRefWorker(Worker):
         }
         prompts.meta_info.update(meta_info)
         with self.rollout_sharding_manager:
-            log_gpu_memory_usage(
-                "After entering rollout sharding manager", logger=logger
-            )
+            log_gpu_memory_usage("After entering rollout sharding manager", logger=logger)
 
             prompts = self.rollout_sharding_manager.preprocess_data(prompts)
             output = self.rollout.generate_sequences(prompts=prompts)
@@ -789,9 +718,7 @@ class ActorRolloutRefWorker(Worker):
 
         if self._is_offload_param:
             # NOTE(sgm): the grad is already in CPU, only offload param here
-            offload_fsdp_param_and_grad(
-                module=self.actor_module_fsdp, offload_grad=self._is_offload_grad
-            )
+            offload_fsdp_param_and_grad(module=self.actor_module_fsdp, offload_grad=self._is_offload_grad)
         # clear kv cache
         torch.cuda.empty_cache()
         log_gpu_memory_usage("After recompute log prob", logger=logger)
@@ -806,12 +733,8 @@ class ActorRolloutRefWorker(Worker):
         is_weights = data.meta_info.get("is_weights", None)
         weight = data.meta_info.get("off_policy_weight", 1.0)
         # we should always recompute old_log_probs when it is HybridEngine
-        data.meta_info["micro_batch_size"] = (
-            self.config.rollout.log_prob_micro_batch_size
-        )
-        data.meta_info["max_token_len"] = (
-            self.config.rollout.log_prob_max_token_len_per_gpu
-        )
+        data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size
+        data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
         # perform recompute log_prob
@@ -866,6 +789,7 @@ class ActorRolloutRefWorker(Worker):
     def save_checkpoint(self, local_path, hdfs_path=None):
         assert self._is_actor
         import torch
+
         if self.rank == 0:
             if not os.path.exists(local_path):
                 os.makedirs(local_path, exist_ok=False)
@@ -890,21 +814,23 @@ class ActorRolloutRefWorker(Worker):
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with FSDP.state_dict_type(self.actor.actor_module, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg):
+            with FSDP.state_dict_type(
+                self.actor.actor_module, StateDictType.SHARDED_STATE_DICT, state_dict_cfg, optim_cfg
+            ):
                 model_state_dict = self.actor.actor_module.state_dict()
                 optimizer_state_dict = self.actor_optimizer.state_dict()
                 lr_scheduler_state_dict = self.actor_lr_scheduler.state_dict()
 
                 extra_state_dict = {
-                    'lr_scheduler': lr_scheduler_state_dict,
+                    "lr_scheduler": lr_scheduler_state_dict,
                 }
-                model_path = os.path.join(local_path, f'model_world_size_{self.world_size}_rank_{self.rank}.pt')
-                optim_path = os.path.join(local_path, f'optim_world_size_{self.world_size}_rank_{self.rank}.pt')
-                extra_path = os.path.join(local_path, f'extra_state_world_size_{self.world_size}_rank_{self.rank}.pt')
+                model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
+                optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
+                extra_path = os.path.join(local_path, f"extra_state_world_size_{self.world_size}_rank_{self.rank}.pt")
 
-                print(f'[rank-{self.rank}]: Saving model to {os.path.abspath(model_path)}')
-                print(f'[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(model_path)}')
-                print(f'[rank-{self.rank}]: Saving extra_state to {os.path.abspath(extra_path)}')
+                print(f"[rank-{self.rank}]: Saving model to {os.path.abspath(model_path)}")
+                print(f"[rank-{self.rank}]: Saving checkpoint to {os.path.abspath(model_path)}")
+                print(f"[rank-{self.rank}]: Saving extra_state to {os.path.abspath(extra_path)}")
                 torch.save(model_state_dict, model_path)
                 torch.save(optimizer_state_dict, optim_path)  # TODO: address optimizer is None
                 torch.save(extra_state_dict, extra_path)
@@ -913,7 +839,7 @@ class ActorRolloutRefWorker(Worker):
         torch.distributed.barrier()
 
         if self.rank == 0:
-            hf_local_path = os.path.join(local_path, 'huggingface')
+            hf_local_path = os.path.join(local_path, "huggingface")
             os.makedirs(hf_local_path, exist_ok=True)
             self.actor.actor_module._fsdp_wrapped_module.config.save_pretrained(hf_local_path)
             self.tokenizer.save_pretrained(local_path)
@@ -935,14 +861,10 @@ class CriticWorker(Worker):
         from torch.distributed.device_mesh import init_device_mesh
 
         fsdp_size = self.config.model.fsdp_config.fsdp_size
-        self.device_mesh = create_device_mesh(
-            world_size=world_size, fsdp_size=fsdp_size
-        )
+        self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
 
         self.ulysses_device_mesh = None
-        self.ulysses_sequence_parallel_size = self.config.get(
-            "ulysses_sequence_parallel_size", 1
-        )
+        self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         dp = world_size // self.ulysses_sequence_parallel_size
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(
@@ -951,9 +873,7 @@ class CriticWorker(Worker):
                 mesh_dim_names=["dp", "sp"],
             )
 
-        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(
-            self.ulysses_device_mesh
-        )
+        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         # set FSDP offload params
         self._is_offload_param = self.config.model.fsdp_config.param_offload
@@ -961,12 +881,8 @@ class CriticWorker(Worker):
         self._is_offload_optimizer = self.config.model.fsdp_config.optimizer_offload
 
         # normalize config
-        self.config.ppo_mini_batch_size //= (
-            torch.distributed.get_world_size() // self.ulysses_sequence_parallel_size
-        )
-        self.config.ppo_micro_batch_size //= (
-            torch.distributed.get_world_size() // self.ulysses_sequence_parallel_size
-        )
+        self.config.ppo_mini_batch_size //= torch.distributed.get_world_size() // self.ulysses_sequence_parallel_size
+        self.config.ppo_micro_batch_size //= torch.distributed.get_world_size() // self.ulysses_sequence_parallel_size
         self.config.forward_micro_batch_size //= (
             torch.distributed.get_world_size() // self.ulysses_sequence_parallel_size
         )
@@ -994,9 +910,7 @@ class CriticWorker(Worker):
 
         from omegaconf import OmegaConf
 
-        override_config = OmegaConf.to_container(
-            self.config.model.get("override_config", OmegaConf.create())
-        )
+        override_config = OmegaConf.to_container(self.config.model.get("override_config", OmegaConf.create()))
         override_config_kwargs = {
             "bos_token_id": self.tokenizer.bos_token_id,
             "eos_token_id": self.tokenizer.eos_token_id,
@@ -1013,9 +927,7 @@ class CriticWorker(Worker):
         from torch import nn
 
         trust_remote_code = False
-        critic_model_config = AutoConfig.from_pretrained(
-            local_path, trust_remote_code=trust_remote_code
-        )
+        critic_model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
         critic_model_config.num_labels = 1
 
         use_remove_padding = config.model.get("use_remove_padding", False)
@@ -1046,9 +958,7 @@ class CriticWorker(Worker):
             critic_module.to(torch_dtype)
 
             if config.model.get("enable_gradient_checkpointing", False):
-                critic_module.gradient_checkpointing_enable(
-                    gradient_checkpointing_kwargs={"use_reentrant": False}
-                )
+                critic_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if self.rank == 0:
             print_model_size(critic_module)
 
@@ -1057,15 +967,9 @@ class CriticWorker(Worker):
         fsdp_config = self.config.model.fsdp_config
         mixed_precision_config = fsdp_config.get("mixed_precision", None)
         if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(
-                mixed_precision_config.get("param_dtype", "bf16")
-            )
-            reduce_dtype = PrecisionType.to_dtype(
-                mixed_precision_config.get("reduce_dtype", "fp32")
-            )
-            buffer_dtype = PrecisionType.to_dtype(
-                mixed_precision_config.get("buffer_dtype", "fp32")
-            )
+            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+            reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
+            buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
         else:
             param_dtype = torch.bfloat16
             reduce_dtype = torch.float32
@@ -1077,9 +981,7 @@ class CriticWorker(Worker):
             buffer_dtype=buffer_dtype,
         )
 
-        auto_wrap_policy = get_fsdp_wrap_policy(
-            module=critic_module, config=self.config.model.fsdp_config.wrap_policy
-        )
+        auto_wrap_policy = get_fsdp_wrap_policy(module=critic_module, config=self.config.model.fsdp_config.wrap_policy)
 
         log_gpu_memory_usage("Before critic FSDP", logger=None)
 
@@ -1131,14 +1033,12 @@ class CriticWorker(Worker):
 
         from verl.workers.critic import DataParallelPPOCritic, DataParallelStepPPOCritic
 
-        self.critic_module, self.critic_optimizer, self.critic_lr_scheduler = (
-            self._build_critic_model_optimizer(self.config)
+        self.critic_module, self.critic_optimizer, self.critic_lr_scheduler = self._build_critic_model_optimizer(
+            self.config
         )
 
         if self._is_offload_param:
-            offload_fsdp_param_and_grad(
-                module=self.critic_module, offload_grad=self._is_offload_grad
-            )
+            offload_fsdp_param_and_grad(module=self.critic_module, offload_grad=self._is_offload_grad)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.critic_optimizer)
 
@@ -1176,9 +1076,7 @@ class CriticWorker(Worker):
 
         output = output.to("cpu")
         if self._is_offload_param:
-            offload_fsdp_param_and_grad(
-                module=self.critic_module, offload_grad=self._is_offload_grad
-            )
+            offload_fsdp_param_and_grad(module=self.critic_module, offload_grad=self._is_offload_grad)
         torch.cuda.empty_cache()
         return output
 
@@ -1192,9 +1090,7 @@ class CriticWorker(Worker):
                 load_grad=self._is_offload_grad,
             )
         if self._is_offload_optimizer:
-            load_fsdp_optimizer(
-                optimizer=self.critic_optimizer, device_id=torch.cuda.current_device()
-            )
+            load_fsdp_optimizer(optimizer=self.critic_optimizer, device_id=torch.cuda.current_device())
 
         # perform forward computation
         with self.ulysses_sharding_manager:
@@ -1205,15 +1101,8 @@ class CriticWorker(Worker):
             delta_time = timer.last
 
             global_num_tokens = data.meta_info["global_token_num"]
-            estimated_flops, promised_flops = self.flops_counter.estimate_flops(
-                global_num_tokens, delta_time
-            )
-            metrics["mfu/critic"] = (
-                estimated_flops
-                * self.config.ppo_epochs
-                / promised_flops
-                / self.world_size
-            )
+            estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
+            metrics["mfu/critic"] = estimated_flops * self.config.ppo_epochs / promised_flops / self.world_size
 
             self.critic_lr_scheduler.step()
             lr = self.critic_lr_scheduler.get_last_lr()[0]
@@ -1223,9 +1112,7 @@ class CriticWorker(Worker):
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
 
         if self._is_offload_param:
-            offload_fsdp_param_and_grad(
-                module=self.critic_module, offload_grad=self._is_offload_grad
-            )
+            offload_fsdp_param_and_grad(module=self.critic_module, offload_grad=self._is_offload_grad)
         if self._is_offload_optimizer:
             offload_fsdp_optimizer(optimizer=self.critic_optimizer)
         torch.cuda.empty_cache()
@@ -1252,20 +1139,14 @@ class CriticWorker(Worker):
         )
 
         cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        with FSDP.state_dict_type(
-            self.critic_module, StateDictType.FULL_STATE_DICT, cfg
-        ):
+        with FSDP.state_dict_type(self.critic_module, StateDictType.FULL_STATE_DICT, cfg):
             state_dict = self.critic_module.state_dict()
-            optimizer_state_dict = FSDP.full_optim_state_dict(
-                self.critic_module, self.critic_optimizer
-            )
+            optimizer_state_dict = FSDP.full_optim_state_dict(self.critic_module, self.critic_optimizer)
 
         if self.rank == 0:
             print(f"Saving critic checkpoint to {local_path}")
             os.makedirs(local_path, exist_ok=True)
-            self.critic_module._fsdp_wrapped_module.save_pretrained(
-                local_path, state_dict=state_dict
-            )
+            self.critic_module._fsdp_wrapped_module.save_pretrained(local_path, state_dict=state_dict)
             self.tokenizer.save_pretrained(local_path)
             if hdfs_path is not None:
                 print(f"Uploading critic checkpoint to {hdfs_path}")
@@ -1283,15 +1164,11 @@ class CriticWorker(Worker):
             # sotrage_writer=distributed_writer,
         )
         t1 = time.perf_counter()
-        print(
-            f"Optimizer state checkpoint saved to {local_path}; Time = {t1 - t0:.4f}\n"
-        )
+        print(f"Optimizer state checkpoint saved to {local_path}; Time = {t1 - t0:.4f}\n")
 
         torch.distributed.barrier()
         if self._is_offload_param:
-            offload_fsdp_param_and_grad(
-                module=self.critic_module, offload_grad=self._is_offload_grad
-            )
+            offload_fsdp_param_and_grad(module=self.critic_module, offload_grad=self._is_offload_grad)
 
 
 # TODO(sgm): we may need to extract it to dp_reward_model.py
@@ -1313,14 +1190,10 @@ class RewardModelWorker(Worker):
         from torch.distributed.device_mesh import init_device_mesh
 
         fsdp_size = self.config.model.fsdp_config.fsdp_size
-        self.device_mesh = create_device_mesh(
-            world_size=world_size, fsdp_size=fsdp_size
-        )
+        self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
 
         self.ulysses_device_mesh = None
-        self.ulysses_sequence_parallel_size = self.config.get(
-            "ulysses_sequence_parallel_size", 1
-        )
+        self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         dp = world_size // self.ulysses_sequence_parallel_size
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(
@@ -1329,9 +1202,7 @@ class RewardModelWorker(Worker):
                 mesh_dim_names=["dp", "sp"],
             )
 
-        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(
-            self.ulysses_device_mesh
-        )
+        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.use_remove_padding = self.config.model.get("use_remove_padding", False)
         self.config.micro_batch_size //= torch.distributed.get_world_size()
@@ -1342,9 +1213,7 @@ class RewardModelWorker(Worker):
             self._do_switch_chat_template = False
         else:
             self._do_switch_chat_template = True
-            input_tokneizer_local_path = copy_local_path_from_hdfs(
-                self.config.model.input_tokenizer
-            )
+            input_tokneizer_local_path = copy_local_path_from_hdfs(self.config.model.input_tokenizer)
 
             self.input_tokenizer = hf_tokenizer(
                 input_tokneizer_local_path,
@@ -1382,9 +1251,7 @@ class RewardModelWorker(Worker):
         self._build_tokenizer(config, local_path)
 
         trust_remote_code = config.model.get("trust_remote_code", False)
-        model_config = AutoConfig.from_pretrained(
-            local_path, trust_remote_code=trust_remote_code
-        )
+        model_config = AutoConfig.from_pretrained(local_path, trust_remote_code=trust_remote_code)
         model_config.num_labels = 1
 
         use_remove_padding = config.model.get("use_remove_padding", False)
@@ -1399,9 +1266,7 @@ class RewardModelWorker(Worker):
             apply_monkey_patch(model_config, verbose=True)
 
         # note that we have to create model in fp32. Otherwise, the optimizer is in bf16, which is incorrect
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings
-        )
+        init_context = get_init_weight_context_manager(use_meta_tensor=not model_config.tie_word_embeddings)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -1414,9 +1279,7 @@ class RewardModelWorker(Worker):
                 trust_remote_code=trust_remote_code,
             )
             reward_module.to(torch.bfloat16)
-        auto_wrap_policy = get_fsdp_wrap_policy(
-            module=reward_module, config=self.config.model.fsdp_config
-        )
+        auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
@@ -1475,12 +1338,10 @@ class RewardModelWorker(Worker):
 
                 # pad and slice the inputs if sp > 1
                 if self.ulysses_sequence_parallel_size > 1:
-                    input_ids_rmpad, position_ids_rmpad, pad_size = (
-                        ulysses_pad_and_slice_inputs(
-                            input_ids_rmpad,
-                            position_ids_rmpad,
-                            sp_size=self.ulysses_sequence_parallel_size,
-                        )
+                    input_ids_rmpad, position_ids_rmpad, pad_size = ulysses_pad_and_slice_inputs(
+                        input_ids_rmpad,
+                        position_ids_rmpad,
+                        sp_size=self.ulysses_sequence_parallel_size,
                     )
 
                 # only pass input_ids and position_ids to enable flash_attn_varlen
@@ -1500,9 +1361,7 @@ class RewardModelWorker(Worker):
                     )
 
                 # pad it back
-                rm_score = pad_input(
-                    reward_rmpad, indices=indices, batch=batch_size, seqlen=seqlen
-                ).squeeze(-1)
+                rm_score = pad_input(reward_rmpad, indices=indices, batch=batch_size, seqlen=seqlen).squeeze(-1)
             else:
                 output = self.reward_module(
                     input_ids=input_ids,
@@ -1524,9 +1383,7 @@ class RewardModelWorker(Worker):
         position_ids = data.batch["position_ids"]
         response_length = data.batch["responses"].shape[-1]
         eos_mask_idx = torch.argmax(position_ids * attention_mask, dim=-1)  # (bsz,)
-        token_level_scores = torch.zeros_like(
-            attention_mask, dtype=scores.dtype
-        )  # (bsz, seqlen)
+        token_level_scores = torch.zeros_like(attention_mask, dtype=scores.dtype)  # (bsz, seqlen)
         token_level_scores[torch.arange(batch_size), eos_mask_idx] = scores
 
         # select the response part
@@ -1550,9 +1407,7 @@ class RewardModelWorker(Worker):
             # extract response
             response_ids = data.batch["responses"][i]
             response_length = response_ids.shape[-1]
-            valid_response_length = data.batch["attention_mask"][i][
-                -response_length:
-            ].sum()
+            valid_response_length = data.batch["attention_mask"][i][-response_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
@@ -1616,13 +1471,8 @@ class RewardModelWorker(Worker):
 
             use_dynamic_bsz = self.config.use_dynamic_bsz
             if use_dynamic_bsz:
-                max_token_len = (
-                    self.config.forward_max_token_len_per_gpu
-                    * self.ulysses_sequence_parallel_size
-                )
-                micro_batches, indices = rearrange_micro_batches(
-                    batch=rm_data.batch, max_token_len=max_token_len
-                )
+                max_token_len = self.config.forward_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+                micro_batches, indices = rearrange_micro_batches(batch=rm_data.batch, max_token_len=max_token_len)
             else:
                 micro_batches = rm_data.batch.split(self.config.micro_batch_size)
             output = []
@@ -1633,12 +1483,8 @@ class RewardModelWorker(Worker):
 
             if use_dynamic_bsz:
                 indices = list(itertools.chain.from_iterable(indices))
-                assert len(indices) == scores.size(
-                    0
-                ), f"{len(indices)} vs. {scores.size()}"
-                revert_indices = torch.tensor(
-                    get_reverse_idx(indices), dtype=torch.long
-                )
+                assert len(indices) == scores.size(0), f"{len(indices)} vs. {scores.size()}"
+                revert_indices = torch.tensor(get_reverse_idx(indices), dtype=torch.long)
                 scores = scores[revert_indices]
 
             token_level_scores = self._expand_to_token_level(data, scores)
@@ -1674,14 +1520,10 @@ class PotentialRewardModelWoker(Worker):
         from torch.distributed.device_mesh import init_device_mesh
 
         fsdp_size = self.config.model.fsdp_config.fsdp_size
-        self.device_mesh = create_device_mesh(
-            world_size=world_size, fsdp_size=fsdp_size
-        )
+        self.device_mesh = create_device_mesh(world_size=world_size, fsdp_size=fsdp_size)
 
         self.ulysses_device_mesh = None
-        self.ulysses_sequence_parallel_size = self.config.get(
-            "ulysses_sequence_parallel_size", 1
-        )
+        self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         dp = world_size // self.ulysses_sequence_parallel_size
         if self.ulysses_sequence_parallel_size > 1:
             self.ulysses_device_mesh = init_device_mesh(
@@ -1690,9 +1532,7 @@ class PotentialRewardModelWoker(Worker):
                 mesh_dim_names=["dp", "sp"],
             )
 
-        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(
-            self.ulysses_device_mesh
-        )
+        self.ulysses_sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
 
         self.use_remove_padding = self.config.model.get("use_remove_padding", False)
         # self.config.micro_batch_size //= torch.distributed.get_world_size()
@@ -1703,9 +1543,7 @@ class PotentialRewardModelWoker(Worker):
             self._do_switch_chat_template = False
         else:
             self._do_switch_chat_template = True
-            input_tokneizer_local_path = copy_local_path_from_hdfs(
-                self.config.model.input_tokenizer
-            )
+            input_tokneizer_local_path = copy_local_path_from_hdfs(self.config.model.input_tokenizer)
 
             self.input_tokenizer = hf_tokenizer(
                 input_tokneizer_local_path,
@@ -1748,9 +1586,7 @@ class PotentialRewardModelWoker(Worker):
             local_path,
             trust_remote_code=True,
         )
-        init_context = get_init_weight_context_manager(
-            use_meta_tensor=not model_config.tie_word_embeddings
-        )
+        init_context = get_init_weight_context_manager(use_meta_tensor=not model_config.tie_word_embeddings)
 
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -1761,9 +1597,7 @@ class PotentialRewardModelWoker(Worker):
                 trust_remote_code=True,
             )
             reward_module.to(torch.bfloat16)
-        auto_wrap_policy = get_fsdp_wrap_policy(
-            module=reward_module, config=self.config.model.fsdp_config
-        )
+        auto_wrap_policy = get_fsdp_wrap_policy(module=reward_module, config=self.config.model.fsdp_config)
 
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
@@ -1793,12 +1627,8 @@ class PotentialRewardModelWoker(Worker):
     def detokenize_data(self, data: DataProto):
         src_tokenizer = self.input_tokenizer
         response_ids = data.batch["responses"]
-        response_length = data.batch["attention_mask"][
-            :, -response_ids.shape[-1] :
-        ].sum(dim=-1)
-        response_strs = src_tokenizer.batch_decode(
-            response_ids, skip_special_tokens=True
-        )
+        response_length = data.batch["attention_mask"][:, -response_ids.shape[-1] :].sum(dim=-1)
+        response_strs = src_tokenizer.batch_decode(response_ids, skip_special_tokens=True)
         detokenize_batch = {
             "response_length": response_length,
             "response_str": np.array(response_strs, dtype=object),
@@ -1806,9 +1636,7 @@ class PotentialRewardModelWoker(Worker):
         data.union(DataProto.from_single_dict(detokenize_batch))
         return data
 
-    def split_by_steps(
-        self, solution: str, num_step_per_chunk: int = 1
-    ) -> List[Dict[str, str]]:
+    def split_by_steps(self, solution: str, num_step_per_chunk: int = 1) -> List[Dict[str, str]]:
         split_token = "\n\n"
         steps = solution.split(split_token)
 
@@ -1823,11 +1651,7 @@ class PotentialRewardModelWoker(Worker):
                 key=lambda x: len(split_results[x]) - len(split_results[x - 1]),
             )
             keep_inds = sorted(inds[-(self.config.max_num_chunk - 2) :])
-            split_results = (
-                split_results[:1]
-                + [split_results[i] for i in keep_inds]
-                + split_results[-1:]
-            )
+            split_results = split_results[:1] + [split_results[i] for i in keep_inds] + split_results[-1:]
         return split_results
 
     def split_response(self, data: DataProto, index: int):
@@ -1838,42 +1662,25 @@ class PotentialRewardModelWoker(Worker):
                 num_step_per_chunk=self.config.chunk_size,
             )
             if self.tiktokenizer is not None:
-                ids = (
-                    data.batch["responses"][
-                        index, : data.batch["response_length"][index]
-                    ]
-                    .cpu()
-                    .tolist()
-                )
+                ids = data.batch["responses"][index, : data.batch["response_length"][index]].cpu().tolist()
                 prefix_to_pos = {
                     # self.tiktokenizer.decode(ids[:_i], allowed_special="all")
-                    self.tiktokenizer.decode(ids[:_i])
-                    .replace(self.tokenizer.pad_token, "")
-                    .strip(): _i
+                    self.tiktokenizer.decode(ids[:_i]).replace(self.tokenizer.pad_token, "").strip(): _i
                     for _i in range(len(ids) + 1)
                 }
                 prefix_to_pos[""] = 0
             else:
                 special_tokens = self.tokenizer.all_special_tokens
                 tokens = self.tokenizer.convert_ids_to_tokens(
-                    data.batch["responses"][
-                        index, : data.batch["response_length"][index]
-                    ]
+                    data.batch["responses"][index, : data.batch["response_length"][index]]
                 )
                 prefix_to_pos = {
                     self.tokenizer.convert_tokens_to_string(
-                        [
-                            tok
-                            for tok in tokens[:_i]
-                            if tok and tok not in special_tokens
-                        ]
+                        [tok for tok in tokens[:_i] if tok and tok not in special_tokens]
                     ).strip(): _i
                     for _i in range(len(tokens) + 1)
                 }
-            return [
-                {"partial_solution": s, "position": prefix_to_pos[s.strip()] - 1}
-                for s in partial_solutions
-            ]
+            return [{"partial_solution": s, "position": prefix_to_pos[s.strip()] - 1} for s in partial_solutions]
 
         elif self.config.split_method == "token":
             if data.batch["response_length"][index] / self.config.chunk_size > self.config.max_num_chunk:
@@ -1887,17 +1694,13 @@ class PotentialRewardModelWoker(Worker):
                     ),
                     "position": i - 1,
                 }
-                for i in range(
-                    0, data.batch["response_length"][index] + 1, chunk_size
-                )
+                for i in range(0, data.batch["response_length"][index] + 1, chunk_size)
             ]
             if data.batch["response_length"][index] % chunk_size != 0:
                 partial_solutions.append(
                     {
                         "partial_solution": self.tokenizer.decode(
-                            data.batch["responses"][
-                                index, : data.batch["response_length"][index]
-                            ],
+                            data.batch["responses"][index, : data.batch["response_length"][index]],
                             skip_special_tokens=True,
                         ),
                         "position": data.batch["response_length"][index].item() - 1,
@@ -1905,9 +1708,7 @@ class PotentialRewardModelWoker(Worker):
                 )
             return partial_solutions
 
-    def apply_choice_template(
-        self, question: str, partial_sotluion: str, choices: List[str], max_tokens: int
-    ) -> str:
+    def apply_choice_template(self, question: str, partial_sotluion: str, choices: List[str], max_tokens: int) -> str:
         # TODO (jiabao): we may use a template file specified in config
         choice_template = [
             {
@@ -1927,21 +1728,15 @@ class PotentialRewardModelWoker(Worker):
             },
         ]
 
-        choice_str = "\n".join(
-            [f"{chr(65 + i)}. {c}" for i, c in enumerate(choices)]
-        )  # This is like A. B. C. D.
+        choice_str = "\n".join([f"{chr(65 + i)}. {c}" for i, c in enumerate(choices)])  # This is like A. B. C. D.
 
         if self.config.pad_to_same:
-            cur_len = len(
-                self.tokenizer(partial_sotluion, add_special_tokens=False)["input_ids"]
-            )
+            cur_len = len(self.tokenizer(partial_sotluion, add_special_tokens=False)["input_ids"])
             partial_sotluion += " ".join(["..."] * max(max_tokens - cur_len, 0))
         choice_template[1]["content"] = choice_template[1]["content"].format(
             question=question, solution=partial_sotluion, choices=choice_str
         )
-        prompt = self.tokenizer.apply_chat_template(
-            choice_template, continue_final_message=True, tokenize=False
-        )
+        prompt = self.tokenizer.apply_chat_template(choice_template, continue_final_message=True, tokenize=False)
         return prompt
 
     def preprocess_rm(self, data: DataProto):
@@ -1958,12 +1753,7 @@ class PotentialRewardModelWoker(Worker):
             for i in range(data.batch.batch_size[0]):
                 pred = data.non_tensor_batch["extracted_answers"][i]
                 correctness = data.batch["answer_correctness"][i]
-                if (
-                    not correctness
-                    and pred is not None
-                    and pred != ""
-                    and not pred.isalpha()
-                ):
+                if not correctness and pred is not None and pred != "" and not pred.isalpha():
                     q_wrong_answers[data.non_tensor_batch["problem"][i]].add(pred)
             q_wrong_answers = {k: list(v) for k, v in q_wrong_answers.items()}
 
@@ -1983,9 +1773,7 @@ class PotentialRewardModelWoker(Worker):
             else:
                 distractors = q_wrong_answers.get(question, [])
                 if len(distractors) < 3:
-                    distractors += data.non_tensor_batch["distractors"][i].tolist()[
-                        : 3 - len(distractors)
-                    ]
+                    distractors += data.non_tensor_batch["distractors"][i].tolist()[: 3 - len(distractors)]
                 assert len(distractors) >= 3
                 gt_answer = data.non_tensor_batch["reward_model"][i]["ground_truth"]
                 all_choices, gt_index = mix_choices(gt_answer, distractors)
@@ -1993,14 +1781,11 @@ class PotentialRewardModelWoker(Worker):
 
             partial_solutions = self.split_response(data, i)
             max_tokens = len(
-                self.tokenizer(
-                    partial_solutions[-1]["partial_solution"], add_special_tokens=False
-                )["input_ids"]
+                self.tokenizer(partial_solutions[-1]["partial_solution"], add_special_tokens=False)["input_ids"]
             )
             num_steps_per_response.append(len(partial_solutions))
             if (
-                self.config.rule_terminal_potential
-                and data.non_tensor_batch["extracted_answers"][i] != ""
+                self.config.rule_terminal_potential and data.non_tensor_batch["extracted_answers"][i] != ""
             ) or self.config.constant_terminal_potential:
                 # Cut final solution short to save a little compute
                 partial_solutions[-1]["partial_solution"] = ""
@@ -2026,9 +1811,7 @@ class PotentialRewardModelWoker(Worker):
         )
 
         rm_batch_dict = {
-            k: torch.tensor(v)
-            if isinstance(v[0], (int, float))
-            else np.array(v, dtype=object)
+            k: torch.tensor(v) if isinstance(v[0], (int, float)) else np.array(v, dtype=object)
             for k, v in rm_batch_dict.items()
         }
 
@@ -2037,13 +1820,9 @@ class PotentialRewardModelWoker(Worker):
 
         return DataProto.from_single_dict(rm_batch_dict), num_steps_per_response
 
-    def _compute_potential_reward(
-        self, data: DataProto, rm_data: DataProto, gt_probs: torch.Tensor
-    ):
+    def _compute_potential_reward(self, data: DataProto, rm_data: DataProto, gt_probs: torch.Tensor):
         batch_size = data.batch.batch_size[0]
-        token_level_scores = torch.zeros_like(
-            data.batch["responses"], dtype=gt_probs.dtype
-        )
+        token_level_scores = torch.zeros_like(data.batch["responses"], dtype=gt_probs.dtype)
         potentials = torch.zeros_like(token_level_scores)
         step_indicator = torch.zeros_like(data.batch["responses"])
 
@@ -2052,9 +1831,7 @@ class PotentialRewardModelWoker(Worker):
         step_positions = rm_data.batch["step_pos"]
         # Group the tuples (step_cnt, step_pos, prob) by origin_index
         grouped = defaultdict(list)
-        for origin, cnt, pos, prob in zip(
-            origin_indices, step_cnts, step_positions, gt_probs
-        ):
+        for origin, cnt, pos, prob in zip(origin_indices, step_cnts, step_positions, gt_probs):
             grouped[origin].append((cnt, pos, prob))
 
         response_prob_diff = {}
@@ -2078,10 +1855,7 @@ class PotentialRewardModelWoker(Worker):
         return token_level_scores, step_indicator, potentials, avg_pr_per_step
 
     def _forward_micro_batch(self, micro_batch: DataProto, data: DataProto):
-        choice_indices = [
-            self.tokenizer.encode(f" {chr(65 + i)}")[0]
-            for i in range(micro_batch["num_choices"].max())
-        ]
+        choice_indices = [self.tokenizer.encode(f" {chr(65 + i)}")[0] for i in range(micro_batch["num_choices"].max())]
         with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
             attention_mask = micro_batch["attention_mask"]
@@ -2104,15 +1878,10 @@ class PotentialRewardModelWoker(Worker):
         # Mannually assign terminal probability
         if (
             self.config.rule_terminal_potential
-            and data.non_tensor_batch["extracted_answers"][
-                micro_batch["origin_index"][-1]
-            ]
-            != ""
+            and data.non_tensor_batch["extracted_answers"][micro_batch["origin_index"][-1]] != ""
         ):
             assert self.config.micro_batch_size == 1
-            rm_score[-1] = data.batch["answer_correctness"][
-                micro_batch["origin_index"][-1]
-            ].item()
+            rm_score[-1] = data.batch["answer_correctness"][micro_batch["origin_index"][-1]].item()
         elif self.config.constant_terminal_potential:
             assert self.config.micro_batch_size == 1
             rm_score[-1] = 1
@@ -2131,17 +1900,12 @@ class PotentialRewardModelWoker(Worker):
             # Group responses together to forward
             num_steps_per_response = [
                 sum(num_steps_per_response[i : i + self.config.micro_batch_size])
-                for i in range(
-                    0, len(num_steps_per_response), self.config.micro_batch_size
-                )
+                for i in range(0, len(num_steps_per_response), self.config.micro_batch_size)
             ]
 
         # Compute potential reward for all job
         micro_batches = rm_data.batch.split(num_steps_per_response)
-        assert (
-            len(micro_batches)
-            == data.batch.batch_size[0] // self.config.micro_batch_size
-        )
+        assert len(micro_batches) == data.batch.batch_size[0] // self.config.micro_batch_size
 
         # TODO (jiabao): we may ues dynamic batch size to improve the efficiency
         gt_probs = []
@@ -2161,17 +1925,16 @@ class PotentialRewardModelWoker(Worker):
                         "probs": response_prob[i].tolist(),
                         "correctness": data.batch["answer_correctness"][i].item(),
                         "length": data.batch["response_length"][i].item(),
-                        "extracted_answer": data.non_tensor_batch["extracted_answers"][
-                            i
-                        ],
+                        "extracted_answer": data.non_tensor_batch["extracted_answers"][i],
                     }
                 )
             import json
+
             json.dump(results, open(f"numina_1.5B_direct_qsc_{self.rank}.json", "w"))
 
         # map to potential reward and original dataset
-        potential_rewards, step_indicator, potentials, avg_pr_per_step = (
-            self._compute_potential_reward(data, rm_data, gt_probs)
+        potential_rewards, step_indicator, potentials, avg_pr_per_step = self._compute_potential_reward(
+            data, rm_data, gt_probs
         )
 
         output = DataProto.from_dict(
