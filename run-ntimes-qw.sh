@@ -46,11 +46,7 @@ for BETA in "${BETAS[@]}"; do
           +algorithm.replay_buffer.capacity=500 \
           +algorithm.replay_buffer.top_percent=0.1 \
           +algorithm.replay_buffer.min_reward=${MIN_REWARD} \
-          +algorithm.replay_buffer.min_distill_interval=1 \
-          +algorithm.replay_buffer.max_distill_interval=20 \
           +algorithm.replay_buffer.fixed_distill_interval=10 \
-          +algorithm.replay_buffer.distill_threshold_ratio=0.3 \
-          +algorithm.replay_buffer.lambda_decay=2.5 \
           +algorithm.replay_buffer.off_policy_weight=0.1 \
           +algorithm.replay_buffer.batch_size=64 \
           +algorithm.replay_buffer.max_is_weight=10.0 \
