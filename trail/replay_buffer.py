@@ -18,9 +18,14 @@ import random
 import copy
 import heapq
 import time
+import gc
+import weakref
 from collections import deque
 from typing import List, Tuple, Dict, Any, Optional
 from verl import DataProto
+
+# 导入 TrailDataProto 以确保类型一致性
+from .data_proto import TrailDataProto
 
 
 class ReplayBuffer:
@@ -68,14 +73,14 @@ class ReplayBuffer:
         # 保留这些变量供指标记录使用
         self.avg_rewards = []
 
-    def add(self, data_item: DataProto, log_prob_old: torch.Tensor):
+    def add(self, data_item: TrailDataProto, log_prob_old: torch.Tensor):
         """添加样本到缓冲区（FIFO策略）
         样本需要同时满足两个条件才会被添加:
         1. 奖励高于min_reward阈值
         2. 奖励在最近的capacity条样本的前top_percent百分比内
 
         Args:
-            data_item: DataProto containing prompt, response, and reward
+            data_item: TrailDataProto containing prompt, response, and reward
             log_prob_old: Log probability of the response under the behavior policy
         """
         # 提取奖励值
@@ -116,18 +121,19 @@ class ReplayBuffer:
                     return False
 
             # 创建数据的深拷贝
-            data_copy = data_item.select(deepcopy=True)
+            data_copy = copy.deepcopy(data_item)
 
             # 确保log_prob_old具有正确的批次维度
+            # 对于DataProtoItem，批次大小始终为1
             if (
                 isinstance(log_prob_old, torch.Tensor)
                 and log_prob_old.dim() > 0
-                and log_prob_old.shape[0] != data_copy.batch.batch_size[0]
+                and log_prob_old.shape[0] != 1
             ):
                 log_prob_old = log_prob_old.unsqueeze(0) if log_prob_old.dim() == 1 else log_prob_old[:1]
 
             # 将log_prob_old添加到数据中
-            data_copy.batch["log_prob_old"] = log_prob_old
+            data_copy.batch["log_prob_old"] = log_prob_old.clone().detach()
 
             # FIFO策略: 将样本添加到队列末尾（如果容量已满，自动移除最旧的样本）
             self.buffer.append((sample_reward, data_copy))
@@ -137,7 +143,8 @@ class ReplayBuffer:
             # 如果缓冲区超出容量（通常不会发生，因为deque有maxlen），移除最早添加的样本
             if len(self.buffer) > self.capacity:
                 removed = self.buffer.popleft()
-                message += f" | Removed oldest sample with reward: {removed[0]:.4f}"
+                del removed  # 显式删除
+                message += f" | Removed oldest sample"
 
         # 只在成功添加到缓冲区时打印完整状态
         if added_to_buffer:
@@ -153,14 +160,14 @@ class ReplayBuffer:
 
         return added_to_buffer
 
-    def sample(self, batch_size: int) -> List[DataProto]:
+    def sample(self, batch_size: int) -> List[List[TrailDataProto]]:
         """从缓冲区中随机采样（不基于奖励权重）
 
         Args:
             batch_size: Number of samples to return
 
         Returns:
-            List of DataProto objects, with total length up to batch_size, but each
+            List of TrailDataProto objects, with total length up to batch_size, but each
             sub-list has at most microbatch_size elements
         """
         # 处理边缘情况：如果buffer为空，直接返回空列表
@@ -184,11 +191,17 @@ class ReplayBuffer:
 
             # 如果是奇数条样本，补充一个副本确保为偶数，有利于均匀分布到多个GPU
             if len(samples) % 2 == 1:
-                samples.append(samples[0])
+                samples.append(copy.deepcopy(samples[0]))
                 print(f"Warning: Odd number of samples, added 1 duplicate to make even: {len(samples)}")
 
             # 按microbatch_size分组
-            return [samples[i : i + self.microbatch_size] for i in range(0, len(samples), self.microbatch_size)]
+            result = [samples[i : i + self.microbatch_size] for i in range(0, len(samples), self.microbatch_size)]
+            
+            # 强制垃圾回收
+            del samples
+            gc.collect()
+            
+            return result
         else:
             # 完全随机采样（不考虑奖励）
             indices = np.random.choice(len(self.buffer), size=min(batch_size, len(self.buffer)), replace=False)
@@ -212,7 +225,7 @@ class ReplayBuffer:
             # 从buffer中提取并删除选中的样本
             buffer_list = list(self.buffer)  # 将deque转为列表以便按索引访问
             for idx in sorted_indices:
-                samples.append(buffer_list[int(idx)][1])
+                samples.append(copy.deepcopy(buffer_list[int(idx)][1]))
 
             # 从buffer中删除已采样的样本
             # 创建新deque并过滤掉被采样的样本
@@ -221,7 +234,23 @@ class ReplayBuffer:
 
             print(f"Sampling completed: randomly sampled {len(samples)} samples")
             # 按microbatch_size分组返回
-            return [samples[i : i + self.microbatch_size] for i in range(0, len(samples), self.microbatch_size)]
+            result = [samples[i : i + self.microbatch_size] for i in range(0, len(samples), self.microbatch_size)]
+            
+            # 清理临时变量并强制垃圾回收
+            del samples, buffer_list, remaining
+            gc.collect()
+            
+            return result
+
+    def clear_buffer(self):
+        """清空缓冲区并强制垃圾回收"""
+        self.buffer.clear()
+        self.all_rewards.clear()
+        self.reward_improvement.clear()
+        self.recent_distill_history.clear()
+        self.avg_rewards.clear()
+        gc.collect()
+        print("Replay buffer cleared and garbage collected")
 
     def __len__(self) -> int:
         return len(self.buffer)
@@ -294,6 +323,9 @@ class ReplayBuffer:
         print(f"Next distillation interval: {self.fixed_distill_interval} (fixed)")
         print(f"Buffer size: {len(self.buffer)}/{self.capacity}")
         print("========================\n")
+        
+        # 强制垃圾回收
+        gc.collect()
 
     def get_distill_stats(self) -> Dict[str, Any]:
         """获取蒸馏相关的统计信息，用于日志记录和监控

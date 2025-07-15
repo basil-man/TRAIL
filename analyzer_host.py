@@ -42,6 +42,7 @@ async def get_token_importance(req: SolutionRequest):
         # importance = (sum(probs)/len(probs) )* length_factor
         importance = (1)* length_factor
         
+        logging.info(f"Calculated importance: {importance}")
         return {"importance": float(importance) if isinstance(importance, (int, float)) else importance}
     except Exception as e:
         logging.error(f"Error processing request: {str(e)}")

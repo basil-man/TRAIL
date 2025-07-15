@@ -40,6 +40,7 @@ def compute_score_lingua(
     solution_str,
     ground_truth,
     extra_info={},
+    **kwargs,
 ) -> float:
     format_score = extra_info.get("format_score", 0.0)
     analyzer_api_url = extra_info.get("analyzer_api_url", "http://localhost:5000/get_token_importance")

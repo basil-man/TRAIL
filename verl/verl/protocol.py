@@ -222,7 +222,7 @@ class DataProto:
         self.check_consistency()
 
     def __len__(self):
-        if self.batch is not None:
+        if self.batch is not None and isinstance(self.batch, TensorDict) and self.batch.batch_size:
             return self.batch.batch_size[0]
         elif self.non_tensor_batch is not None and len(self.non_tensor_batch) > 0:
             random_key = list(self.non_tensor_batch.keys())[0]
@@ -256,8 +256,8 @@ class DataProto:
 
         # Case 3: Single integer - return DataProtoItem for backward compatibility
         elif isinstance(item, int | np.integer):
-            tensor_data = self.batch[item] if self.batch is not None else None
-            non_tensor_data = {key: val[item] for key, val in self.non_tensor_batch.items()}
+            tensor_data = self.batch[item].clone().detach() if self.batch is not None else None
+            non_tensor_data = {key: copy.copy(val[item]) for key, val in self.non_tensor_batch.items()}
             return DataProtoItem(batch=tensor_data, non_tensor_batch=non_tensor_data, meta_info=self.meta_info)
 
         # # Case 4: Unsupported type
