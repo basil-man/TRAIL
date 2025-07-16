@@ -39,8 +39,8 @@ async def get_token_importance(req: SolutionRequest):
         probs,token_length = analyzer.get_token_importance(req.solution_str)
         # 使用beta计算长度感知的重要性
         length_factor = 1 / (token_length ** (args.beta-1))
-        # importance = (sum(probs)/len(probs) )* length_factor
-        importance = (1)* length_factor
+        importance = (sum(probs)/len(probs) )* length_factor
+        #importance = (1)* length_factor
         
         logging.info(f"Calculated importance: {importance}")
         return {"importance": float(importance) if isinstance(importance, (int, float)) else importance}
