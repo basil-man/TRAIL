@@ -69,20 +69,21 @@ class TrailPPOTrainer(RayPPOTrainer):
         self.use_replay_buffer = self.config.algorithm.get("use_replay_buffer", False)
         if self.use_replay_buffer:
             replay_config = self.config.algorithm.replay_buffer
-            self.replay_buffer = ReplayBuffer(
+            self.replay_buffer = ReplayBuffer.remote(
                 capacity=replay_config.get("capacity", 10000),
                 top_percent=replay_config.get("top_percent", 0.05),
                 min_reward=replay_config.get("min_reward", 0.85),
                 microbatch_size=replay_config.get("microbatch_size", 8),
                 fixed_distill_interval=replay_config.get("fixed_distill_interval", 10),
             )
-            print(f"Initialized replay buffer with capacity {self.replay_buffer.capacity}")
+            print(f"Initialized replay buffer as a Ray actor.")
         else:
             self.replay_buffer = None
 
     def _perform_distillation(self, timing_raw: dict):
         """Perform distillation using replay buffer samples."""
-        if not self.use_replay_buffer or not self.replay_buffer.should_distill(self.global_steps):
+        should_distill = ray.get(self.replay_buffer.should_distill.remote(self.global_steps))
+        if not self.use_replay_buffer or not should_distill:
             return {}
 
         with marked_timer("distillation", timing_raw, color="purple"):
@@ -90,7 +91,7 @@ class TrailPPOTrainer(RayPPOTrainer):
 
             replay_config = self.config.algorithm.replay_buffer
             batch_size = replay_config.get("batch_size", 64)
-            replay_samples_list = self.replay_buffer.sample(batch_size)
+            replay_samples_list = ray.get(self.replay_buffer.sample.remote(batch_size))
 
             if not replay_samples_list:
                 print("No samples available in replay buffer for distillation.")
@@ -176,9 +177,14 @@ class TrailPPOTrainer(RayPPOTrainer):
                     final_actor_loss = actor_metrics.get("actor/loss", 0)
 
             reward_improvement = initial_actor_loss - final_actor_loss
-            self.replay_buffer.update_distill_metrics(self.global_steps, reward_improvement)
-            distill_metrics.update(self.replay_buffer.get_distill_stats())
+            # This is an async call
+            self.replay_buffer.update_distill_metrics.remote(self.global_steps, reward_improvement)
+            distill_stats = ray.get(self.replay_buffer.get_distill_stats.remote())
+            distill_metrics.update(distill_stats)
             print(f"--- Finished distillation at step {self.global_steps} ---")
+            # Clean up to prevent memory leaks
+            del replay_samples_list
+            gc.collect()
             return distill_metrics
 
     def fit(self):
@@ -210,9 +216,6 @@ class TrailPPOTrainer(RayPPOTrainer):
         for epoch in range(self.config.trainer.total_epochs):
             print(f"\n=== Starting Epoch {epoch} ===")
             
-            # Perform garbage collection at the start of each epoch
-            gc.collect()
-            
             for batch_dict in self.train_dataloader:
                 try:
                     metrics = {}
@@ -233,15 +236,7 @@ class TrailPPOTrainer(RayPPOTrainer):
                             if self.use_rm:
                                 self.rm_wg.start_profile()
 
-                    batch_raw: DataProto = DataProto.from_single_dict(batch_dict)
-                    batch = TrailDataProto(
-                        batch=batch_raw.batch,
-                        non_tensor_batch=batch_raw.non_tensor_batch,
-                        meta_info=batch_raw.meta_info,
-                    )
-                    
-                    # Clean up temporary variables
-                    del batch_raw
+                    batch: DataProto = DataProto.from_single_dict(batch_dict)
                     
                     batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
                     non_tensor_batch_keys_to_pop = [
@@ -274,13 +269,26 @@ class TrailPPOTrainer(RayPPOTrainer):
                             timing_raw.update(gen_batch_output.meta_info.get("timing", {}))
                             gen_batch_output.meta_info.pop("timing", None)
 
+                        if self.config.algorithm.adv_estimator == core_algos.AdvantageEstimator.REMAX:
+                            with marked_timer("gen_max", timing_raw, color="purple"):
+                                gen_baseline_batch = deepcopy(gen_batch)
+                                gen_baseline_batch.meta_info["do_sample"] = False
+                                gen_baseline_output = self.actor_rollout_wg.generate_sequences(gen_baseline_batch)
+
+                                baseline_batch = batch.union(gen_baseline_output)
+                                reward_baseline_tensor = self.reward_fn(baseline_batch)
+                                reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+
+                                batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+                                batch.batch["reward_baselines"] = reward_baseline_tensor
+                                del gen_baseline_batch, gen_baseline_output, baseline_batch
+
                         batch.non_tensor_batch["uid"] = np.array(
                             [str(uuid.uuid4()) for _ in range(len(batch.batch))], dtype=object
                         )
                         batch = batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                         batch = batch.union(gen_batch_output)
                         
-                        # Clean up temporary variables
                         del gen_batch, gen_batch_output
 
                         if "response_mask" not in batch.batch:
@@ -309,6 +317,29 @@ class TrailPPOTrainer(RayPPOTrainer):
                             metrics.update({"actor/entropy": entropy_agg.detach().item()})
                             old_log_prob.batch.pop("entropys")
                             batch = batch.union(old_log_prob)
+
+                            if "rollout_log_probs" in batch.batch.keys():
+                                rollout_old_log_probs = batch.batch["rollout_log_probs"]
+                                actor_old_log_probs = batch.batch["old_log_probs"]
+                                attention_mask = batch.batch["attention_mask"]
+                                responses = batch.batch["responses"]
+                                response_length = responses.size(1)
+                                response_mask = attention_mask[:, -response_length:]
+
+                                rollout_probs = torch.exp(rollout_old_log_probs)
+                                actor_probs = torch.exp(actor_old_log_probs)
+                                rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
+                                rollout_probs_diff = torch.masked_select(rollout_probs_diff, response_mask.bool())
+                                rollout_probs_diff_max = torch.max(rollout_probs_diff)
+                                rollout_probs_diff_mean = torch.mean(rollout_probs_diff)
+                                rollout_probs_diff_std = torch.std(rollout_probs_diff)
+                                metrics.update(
+                                    {
+                                        "training/rollout_probs_diff_max": rollout_probs_diff_max.detach().item(),
+                                        "training/rollout_probs_diff_mean": rollout_probs_diff_mean.detach().item(),
+                                        "training/rollout_probs_diff_std": rollout_probs_diff_std.detach().item(),
+                                    }
+                                )
                             del old_log_prob, entropys, response_masks
 
                         if self.use_reference_policy:
@@ -356,12 +387,14 @@ class TrailPPOTrainer(RayPPOTrainer):
                         # Add high-quality samples to replay buffer
                         if self.use_replay_buffer:
                             with marked_timer("add_to_buffer", timing_raw, color="orange"):
-                                for i in range(len(batch.batch)):
+                                add_futures = []
+                                for i in range(len(batch)):
                                     sample_data = batch[i]
-                                    # Create a deep copy and immediately delete the reference
-                                    sample_copy = deepcopy(sample_data)
-                                    self.replay_buffer.add(sample_copy, sample_data.batch["old_log_probs"])
-                                    del sample_data, sample_copy
+                                    # Call add asynchronously
+                                    add_futures.append(self.replay_buffer.add.remote(sample_data, sample_data.batch["old_log_probs"]))
+                                # Optionally, wait for all adds to complete if you need to ensure they are processed
+                                # For performance, we can proceed without waiting.
+                                # ray.get(add_futures)
 
                         if self.use_critic:
                             with marked_timer("update_critic", timing_raw, color="pink"):
@@ -379,7 +412,21 @@ class TrailPPOTrainer(RayPPOTrainer):
                         # Perform distillation from replay buffer
                         distill_metrics = self._perform_distillation(timing_raw)
                         metrics.update(distill_metrics)
-                        del distill_metrics
+
+                        # Log rollout generations if enabled
+                        rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
+                        if rollout_data_dir:
+                            with marked_timer("dump_rollout_generations", timing_raw, color="green"):
+                                inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
+                                outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
+                                scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
+                                self._dump_generations(
+                                    inputs=inputs,
+                                    outputs=outputs,
+                                    scores=scores,
+                                    reward_extra_infos_dict=reward_extra_infos_dict,
+                                    dump_path=rollout_data_dir,
+                                )
 
                         if (
                             self.val_reward_fn is not None
@@ -435,22 +482,9 @@ class TrailPPOTrainer(RayPPOTrainer):
                     # Clean up large objects related to batch
                     del batch, metrics, timing_raw
                     
-                    # Force garbage collection every 10 steps
+                    # Force garbage collection periodically
                     if self.global_steps % 10 == 0:
                         gc.collect()
-                        if self.use_replay_buffer and hasattr(self.replay_buffer, 'clear_buffer'):
-                            # If memory usage is high, clean up part of the buffer
-                            import psutil
-                            memory_percent = psutil.virtual_memory().percent
-                            if memory_percent > 85:  # Clean up if memory usage exceeds 85%
-                                print(f"High memory usage detected ({memory_percent:.1f}%), performing cleanup")
-                                # Optionally clean up part of the buffer instead of all
-                                if len(self.replay_buffer.buffer) > self.replay_buffer.capacity // 2:
-                                    # Retain the latest half of the data
-                                    new_buffer = deque(list(self.replay_buffer.buffer)[-self.replay_buffer.capacity//2:], 
-                                                     maxlen=self.replay_buffer.capacity)
-                                    self.replay_buffer.buffer = new_buffer
-                                gc.collect()
 
                     if is_last_step:
                         if last_val_metrics:
@@ -475,14 +509,3 @@ class TrailPPOTrainer(RayPPOTrainer):
             # Perform memory cleanup at the end of each epoch
             print(f"=== Completed Epoch {epoch}, performing memory cleanup ===")
             gc.collect()
-            
-            # Clean up old data in replay buffer
-            if self.use_replay_buffer and epoch > 0:
-                # Retain the latest 80% of data after each epoch
-                if len(self.replay_buffer.buffer) > 100:
-                    keep_size = int(len(self.replay_buffer.buffer) * 0.8)
-                    new_buffer = deque(list(self.replay_buffer.buffer)[-keep_size:], 
-                                     maxlen=self.replay_buffer.capacity)
-                    self.replay_buffer.buffer = new_buffer
-                    print(f"Cleaned replay buffer, kept {keep_size} samples")
-                    gc.collect()

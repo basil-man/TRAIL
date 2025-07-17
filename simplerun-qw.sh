@@ -2,9 +2,7 @@
 
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export HYDRA_FULL_ERROR=1
-export WANDB_API_KEY=bf9ae74795eb47b66c791ae2a3952ca1eacacf12
 export RAY_memory_monitor_refresh_ms=0
-
 BASE_RUN_NAME=${BASE_RUN_NAME:-"trail"}
 MODEL_BASE_PATH=Qwen/Qwen2.5-0.5B-Instruct
 DATA_DIR=data/math_qwen
@@ -18,7 +16,7 @@ DATA_TYPE="test"
 RUN_NAME="TRAIL"
 MODEL_DIR=checkpoints/${RUN_NAME}
 
-python3 -m trail.main_trail \
+python3 -m verl.trainer.main_ppo \
   algorithm.adv_estimator=grpo \
   custom_reward_function.path=verl/verl/utils/reward_score/lingua_avg.py \
   custom_reward_function.name=compute_score_lingua \
@@ -33,12 +31,15 @@ python3 -m trail.main_trail \
   +algorithm.replay_buffer.microbatch_size=4 \
   data.train_files=${DATA_DIR}/train.parquet \
   data.val_files=${DATA_DIR}/test.parquet \
-  data.train_batch_size=128 \
+  data.train_batch_size=64 \
   data.val_batch_size=128 \
-  data.max_prompt_length=2048 \
+  data.max_prompt_length=512 \
   data.max_response_length=1024 \
+  data.filter_overlong_prompts=True \
+  data.truncation='error' \
+  data.shuffle=False \
   actor_rollout_ref.model.path=${MODEL_BASE_PATH} \
-  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.actor.optim.lr=3e-6 \
   actor_rollout_ref.model.use_remove_padding=True \
   actor_rollout_ref.actor.ppo_mini_batch_size=32 \
   actor_rollout_ref.actor.ppo_micro_batch_size=16 \
@@ -62,7 +63,7 @@ python3 -m trail.main_trail \
   actor_rollout_ref.rollout.enable_chunked_prefill=False \
   actor_rollout_ref.rollout.enforce_eager=False \
   actor_rollout_ref.rollout.free_cache_engine=True \
-  actor_rollout_ref.rollout.n=8 \
+  actor_rollout_ref.rollout.n=4 \
   actor_rollout_ref.rollout.max_num_seqs=512 \
   actor_rollout_ref.rollout.max_model_len=2048 \
   actor_rollout_ref.rollout.max_num_batched_tokens=32768 \
@@ -73,8 +74,8 @@ python3 -m trail.main_trail \
   trainer.val_before_train=False \
   trainer.default_local_dir=$MODEL_DIR \
   trainer.default_hdfs_dir=null \
-  trainer.logger=['console'] \
-  trainer.project_name='verl_math' \
+  trainer.logger=['console','swanlab'] \
+  trainer.project_name='trail_math' \
   trainer.experiment_name=${RUN_NAME} \
   trainer.n_gpus_per_node=$N_GPUS \
   trainer.nnodes=1 \

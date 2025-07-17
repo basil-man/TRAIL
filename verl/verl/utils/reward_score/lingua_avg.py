@@ -42,9 +42,9 @@ def compute_score_lingua(
     extra_info={},
     **kwargs,
 ) -> float:
-    format_score = extra_info.get("format_score", 0.0)
-    analyzer_api_url = extra_info.get("analyzer_api_url", "http://localhost:5000/get_token_importance")
-    lam = extra_info.get("lam", 0.8)
+    format_score = 0.0
+    analyzer_api_url = "http://localhost:5000/get_token_importance"
+    lam = 0.8
     answer = extract_answer(solution_str, "math", use_last_number=False)
     if answer is None or answer == "":
         return 0

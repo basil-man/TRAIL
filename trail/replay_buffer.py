@@ -23,11 +23,13 @@ import weakref
 from collections import deque
 from typing import List, Tuple, Dict, Any, Optional
 from verl import DataProto
+import ray
 
 # 导入 TrailDataProto 以确保类型一致性
 from .data_proto import TrailDataProto
 
 
+@ray.remote
 class ReplayBuffer:
     """Replay buffer for off-policy learning with FIFO replacement and random sampling."""
 
@@ -100,8 +102,6 @@ class ReplayBuffer:
 
             # 检查最低奖励阈值
             if sample_reward < self.min_reward:
-                message = f"Sample rejected: reward {sample_reward:.4f} below minimum threshold {self.min_reward}"
-                print(message)
                 return False
 
             # 检查是否在前top_percent百分比内
@@ -113,15 +113,11 @@ class ReplayBuffer:
 
                 # 如果当前样本奖励不在前top_percent内，拒绝添加
                 if sample_reward < reward_threshold:
-                    message = (
-                        f"Sample rejected: reward {sample_reward:.4f} not in top {self.top_percent*100}% "
-                        f"(threshold: {reward_threshold:.4f})"
-                    )
-                    print(message)
                     return False
 
-            # 创建数据的深拷贝
-            data_copy = copy.deepcopy(data_item)
+            # Actor模式下，Ray序列化会自动处理数据拷贝，无需手动克隆
+            data_copy = data_item
+            data_copy.batch = data_copy.batch.copy()
 
             # 确保log_prob_old具有正确的批次维度
             # 对于DataProtoItem，批次大小始终为1
@@ -148,15 +144,11 @@ class ReplayBuffer:
 
         # 只在成功添加到缓冲区时打印完整状态
         if added_to_buffer:
-            print("==================================")
-            print(message)
-            print(f"current buffer len: {len(self.buffer)}")
-            print(f"min reward threshold: {self.min_reward}")
             if len(self.all_rewards) >= 10:
                 top_reward = sorted(self.all_rewards, reverse=True)[0]
-                print(f"current top reward: {top_reward:.4f}")
-                print(f"top {self.top_percent*100}% threshold: {reward_threshold:.4f}")
-            print("==================================")
+                print(f"[BUFFER] {message} | len:{len(self.buffer)} | min_reward:{self.min_reward} | top_reward:{top_reward:.4f} | top_{self.top_percent*100}%_threshold:{reward_threshold:.4f}")
+            else:
+                print(f"[BUFFER] {message} | len:{len(self.buffer)} | min_reward:{self.min_reward}")
 
         return added_to_buffer
 
@@ -191,7 +183,7 @@ class ReplayBuffer:
 
             # 如果是奇数条样本，补充一个副本确保为偶数，有利于均匀分布到多个GPU
             if len(samples) % 2 == 1:
-                samples.append(copy.deepcopy(samples[0]))
+                samples.append(samples[0])
                 print(f"Warning: Odd number of samples, added 1 duplicate to make even: {len(samples)}")
 
             # 按microbatch_size分组
@@ -225,7 +217,7 @@ class ReplayBuffer:
             # 从buffer中提取并删除选中的样本
             buffer_list = list(self.buffer)  # 将deque转为列表以便按索引访问
             for idx in sorted_indices:
-                samples.append(copy.deepcopy(buffer_list[int(idx)][1]))
+                samples.append(buffer_list[int(idx)][1])
 
             # 从buffer中删除已采样的样本
             # 创建新deque并过滤掉被采样的样本
